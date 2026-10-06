@@ -4,7 +4,7 @@
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include "OtaTrust.h"
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.1.0"
 #define FIRMWARE_BOARD "esp32s3usbotg-4mb"
 String otaStatus="Waiting for startup check";
 bool otaRequested=false, otaBootPending=true;

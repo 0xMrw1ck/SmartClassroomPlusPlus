@@ -13,6 +13,7 @@
 #include <Adafruit_SSD1306.h>
 #include "AppSettings.h"
 #include "GithubOTA.h"
+#include "CloudBridge.h"
 #include "DashboardAssets.h"
 #include "ButtonInput.h"
 #include "ButtonInputChecks.h"
@@ -618,10 +619,10 @@ bool renderOLED() {
     return sendOLEDFrame();
   }
   if (oledView == 2) {
-    oledText(13, WiFi.status() == WL_CONNECTED ? "LAN webpage:" : "LAN: disconnected");
-    oledText(24, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("Use ESP32 hotspot"));
-    oledText(35, "Hotspot webpage:");
-    oledText(46, WiFi.softAPIP().toString());
+    oledText(13, WiFi.status() == WL_CONNECTED ? String("LAN:") + WiFi.localIP().toString() : String("LAN: disconnected"));
+    oledText(24, String("AP:") + WiFi.softAPIP().toString());
+    oledText(35, "Home Wi-Fi MAC:");
+    oledText(46, WiFi.macAddress());
     oledText(56, "NETWORK  3/3");
     return sendOLEDFrame();
   }
@@ -717,8 +718,7 @@ void sendJSON(int code, const String &s) {
   server.sendHeader("Cache-Control", "no-store");
   server.send(code, "application/json", s);
 }
-void handleRadarApi() {
-  if (!authorized()) return;
+String radarJSON() {
   int64_t epoch = clockNow();
   uint32_t today = dateAt(epoch);
   String s = "{\"time\":" + quote(timestamp()) + ",\"timeValid\":" + (epoch ? "true" : "false");
@@ -731,6 +731,7 @@ void handleRadarApi() {
   s += ",\"todayKWh\":" + (today ? String(dayWh(today) / 1000.0, 3) : String("null")) + ",\"unallocatedKWh\":" + String(ledger.unallocatedWh / 1000.0, 3);
   s += ",\"room\":" + quote(ROOM_NAME) + ",\"oledOnline\":" + String(oledReady ? "true" : "false") + ",\"uptimeSec\":" + String(millis() / 1000);
   s += ",\"wifiConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",\"localIP\":" + quote(WiFi.localIP().toString()) + ",\"apIP\":" + quote(WiFi.softAPIP().toString());
+  s += ",\"stationMAC\":" + quote(WiFi.macAddress()) + ",\"hotspotMAC\":" + quote(WiFi.softAPmacAddress());
   s += ",\"delaysSec\":[" + String(VACANCY_MS[0] / 1000) + "," + String(VACANCY_MS[1] / 1000) + "]";
   s += ",\"zone\":{\"xMin\":" + String(X_MIN) + ",\"xMax\":" + String(X_MAX) + ",\"yMin\":" + String(Y_MIN) + ",\"yMax\":" + String(Y_MAX) + "}";
   s += ",\"channels\":[";
@@ -760,12 +761,37 @@ void handleRadarApi() {
     s += quote(events[(eventNext + 40 - 1 - i) % 40]);
   }
   s += "]}";
-  sendJSON(200, s);
+  return s;
+}
+void handleRadarApi() { if(authorized()) sendJSON(200,radarJSON()); }
+void publishCloudSnapshot() {
+  if(!cloudConfig.enabled || otaBootPending || millis()-cloudLastQueued<cloudConfig.intervalSeconds*1000UL)return;
+  cloudLastQueued=millis();
+  JsonDocument d; deserializeJson(d,radarJSON());
+  d.remove("localIP");d.remove("apIP");d.remove("stationMAC");d.remove("hotspotMAC");d.remove("events");d.remove("targets");
+  String payload;serializeJson(d,payload);queueCloudTelemetry(payload);
 }
 extern String otaStatus;
 extern bool otaRequested;
 uint32_t restartAt = 0;
 void startWebServer() {
+  server.on("/api/cloud",HTTP_GET,[](){
+    if(!authorized())return;CloudState state=cloudSnapshot();JsonDocument d;
+    d["enabled"]=cloudConfig.enabled;d["intervalSeconds"]=cloudConfig.intervalSeconds;d["apiKey"]=cloudConfig.apiKey;d["databaseURL"]=cloudConfig.databaseURL;
+    d["deviceUid"]=state.uid;d["status"]=state.status;d["lastSuccessAgeSec"]=nullptr;
+    if(state.lastSuccess)d["lastSuccessAgeSec"]=(millis()-state.lastSuccess)/1000;
+    String out;serializeJson(d,out);sendJSON(200,out);
+  });
+  server.on("/api/cloud",HTTP_POST,[](){
+    if(!authorized())return;String body=server.arg("plain");JsonDocument d;
+    if(body.length()>2048 || deserializeJson(d,body) || !d["enabled"].is<bool>() || !d["intervalSeconds"].is<uint32_t>() || !d["apiKey"].is<const char*>() || !d["databaseURL"].is<const char*>()) {sendJSON(400,"{\"error\":\"Invalid cloud settings\"}");return;}
+    CloudConfig c=cloudConfig;String key=d["apiKey"].as<String>(),url=d["databaseURL"].as<String>();
+    if(key.length()>128 || url.length()>192){sendJSON(400,"{\"error\":\"Cloud configuration too long\"}");return;}
+    c.enabled=d["enabled"];c.intervalSeconds=d["intervalSeconds"];strlcpy(c.apiKey,key.c_str(),sizeof(c.apiKey));strlcpy(c.databaseURL,url.c_str(),sizeof(c.databaseURL));
+    String error=validateCloudConfig(c);if(error.length()){sendJSON(400,"{\"error\":"+quote(error)+"}");return;}
+    if(!saveCloudConfig(c)){sendJSON(500,"{\"error\":\"Cloud settings save failed\"}");return;}
+    standby=true;controlRelays();saveLedger();sendJSON(200,"{\"ok\":true}");restartAt=millis()+1000;
+  });
   server.on("/api/ota",HTTP_GET,[](){ if(!authorized())return; sendJSON(200,"{\"version\":"+quote(FIRMWARE_VERSION)+",\"status\":"+quote(otaStatus)+"}"); });
   server.on("/api/ota",HTTP_POST,[](){ if(!authorized())return; otaRequested=true; sendJSON(202,"{\"ok\":true}"); });
   server.on("/api/settings", HTTP_GET, []() {
@@ -891,6 +917,7 @@ void startAccessPoint() {
 
 void firmwareSetup() {
   loadSettings();
+  loadCloudConfig();
   button.holdMs = settings.buttonHold;
   // Latch OFF before enabling outputs. Hardware must also hold relay inputs OFF during reset.
   for (int i = 0; i < 2; i++) {
@@ -919,6 +946,8 @@ void firmwareSetup() {
   WiFi.mode(WIFI_AP_STA);
   WiFi.setAutoReconnect(true);
   startAccessPoint();
+  Serial.println("Home Wi-Fi MAC (router allowlist): " + WiFi.macAddress());
+  Serial.println("Hotspot MAC: " + WiFi.softAPmacAddress());
   connectToHomeWiFi();
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // Epoch stays UTC; display/date code adds UTC+8.
   startWebServer();
@@ -940,6 +969,7 @@ void firmwareLoop() {
   pollMeter();
   updateOLED();
   server.handleClient();
+  publishCloudSnapshot();
   bool connected = WiFi.status() == WL_CONNECTED;
   if (connected != wifiWasConnected) {
     wifiWasConnected = connected;
