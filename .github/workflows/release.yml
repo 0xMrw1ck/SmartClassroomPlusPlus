@@ -1,0 +1,40 @@
+name: Firmware release
+on:
+  push:
+    tags: ['v*.*.*']
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install toolchain
+        run: |
+          arduino-cli config init
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.12 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli lib install 'ArduinoJson@7.4.2' 'Adafruit SSD1306@2.5.17' 'Adafruit GFX Library@1.12.6'
+      - name: Validate version and build
+        run: |
+          VERSION=$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"/\1/p' SmartClassroomS3OLED/GithubOTA.h)
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          arduino-cli compile --fqbn esp32:esp32:esp32s3usbotg:PartitionScheme=min_spiffs --build-property 'compiler.cpp.extra_flags=-DPUBLIC_RELEASE' --build-path build SmartClassroomS3OLED
+          cp build/SmartClassroomS3OLED.ino.bin firmware.bin
+          export VERSION
+          python3 - <<'PY'
+          import os,json,hashlib,pathlib
+          b=pathlib.Path('firmware.bin').read_bytes()
+          assert len(b)<=1966080
+          data={'version':os.environ['VERSION'],'board':'esp32s3usbotg-4mb','size':len(b),'sha256':hashlib.sha256(b).hexdigest(),'url':f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['GITHUB_REF_NAME']}/firmware.bin"}
+          pathlib.Path('manifest.json').write_text(json.dumps(data))
+          PY
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            firmware.bin
+            manifest.json
