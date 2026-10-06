@@ -74,3 +74,11 @@ constexpr bool delayedLoopRelease() {
 }
 static_assert(delayedLoopRelease(), "A recorded 5s hold must work despite a slow loop");
 }
+
+constexpr bool configurableHoldChecks() {
+  ButtonInput b; b.holdMs=2000; b.begin(false,0); b.update(true,100,false); b.update(true,140,false);
+  if(b.update(true,2099,false)!=ButtonInput::NONE || b.update(true,2100,false)!=ButtonInput::STANDBY)return false;
+  ButtonInput c; c.holdMs=15000; c.begin(false,0); c.update(true,100,false); c.update(true,140,false);
+  return c.update(true,5100,false)==ButtonInput::NONE && c.countdown(5100)==10 && c.update(true,15100,false)==ButtonInput::STANDBY;
+}
+static_assert(configurableHoldChecks(),"Configured button hold must change threshold and countdown");

@@ -1,6 +1,6 @@
-// Keep ClassroomFirmware.h and DashboardAssets.h in this same folder.
-// Install Adafruit SSD1306 + Adafruit GFX (and their dependencies).
-// Select ESP32S3 Dev Module and your previously working USB/flash settings.
+// Keep every .h file beside this sketch. LocalProvisioning.h stays private.
+// Install ArduinoJson 7.4.2, Adafruit SSD1306 and Adafruit GFX.
+// Board ESP32-S3-USB-OTG; Minimal SPIFFS (1.9MB APP with OTA).
 #include "ClassroomFirmware.h"
 void setup() {
   firmwareSetup();
