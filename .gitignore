@@ -1,0 +1,7 @@
+**/LocalProvisioning.h
+.codex-remote-attachments/
+*.bin
+*.elf
+*.map
+*.png
+.build/
