@@ -6,6 +6,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "CloudTrust.h"
+#include "CloudResponse.h"
 
 struct CloudConfig {
   uint32_t schema=1, intervalSeconds=30;
@@ -54,13 +55,22 @@ inline void loadCloudConfig() {
   cloudSetStatus(cloudConfig.enabled?"Waiting for internet":"Disabled");
 }
 inline int cloudHTTP(const String &url,const char *method,const String &body,String &response,const char *type="application/json") {
+  response="";
   NetworkClientSecure client;client.setCACert(CLOUD_ROOTS);client.setHandshakeTimeout(5);
   HTTPClient h;h.setConnectTimeout(4000);h.setTimeout(5000);h.useHTTP10(true);
   if(!h.begin(client,url))return -1;
   if(strcmp(method,"GET")!=0)h.addHeader("Content-Type",type);
   int code=strcmp(method,"GET")==0?h.GET():h.sendRequest(method,body);
   int length=h.getSize();
-  if(code>0 && length>=0 && length<=16384)response=h.getString();
+  if(code>0 && code!=204) {
+    if(length>static_cast<int>(CloudResponse::limit)) { h.end(); return -1001; }
+    CloudResponse sink;
+    int received=h.writeToStream(&sink);
+    if(sink.overflow) { h.end(); return -1001; }
+    if(sink.allocationFailed) { h.end(); return -1002; }
+    if(received<0) { h.end(); return received; }
+    response=sink.body;
+  }
   h.end();return code;
 }
 inline String cloudFormEscape(const String &s) {
@@ -90,7 +100,13 @@ inline void cloudWorker(void *) {
         code=cloudHTTP("https://securetoken.googleapis.com/v1/token?key="+String(cloudConfig.apiKey),"POST","grant_type=refresh_token&refresh_token="+cloudFormEscape(refresh),response,"application/x-www-form-urlencoded");
       }
       JsonDocument auth;
-      if(code!=200 || deserializeJson(auth,response)) {cloudSetStatus("Firebase sign-in failed ("+String(code)+")");continue;}
+      if(code!=200) {cloudSetStatus("Firebase sign-in HTTP/transport error ("+String(code)+")");continue;}
+      DeserializationError authError=deserializeJson(auth,response);
+      if(authError) {
+        cloudSetStatus("Firebase response invalid: "+String(authError.c_str()));
+        Serial.printf("Cloud auth JSON error: %s; HTTP=%d; bytes=%u\n",authError.c_str(),code,(unsigned)response.length());
+        continue;
+      }
       String nextToken=auth["idToken"].is<const char*>() ? auth["idToken"].as<String>() : String(auth["id_token"] | "");
       String nextRefresh=auth["refreshToken"].is<const char*>() ? auth["refreshToken"].as<String>() : String(auth["refresh_token"] | "");
       String nextUID=auth["localId"].is<const char*>() ? auth["localId"].as<String>() : String(auth["user_id"] | "");
