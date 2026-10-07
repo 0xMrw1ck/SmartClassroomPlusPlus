@@ -764,10 +764,13 @@ String radarJSON() {
   return s;
 }
 void handleRadarApi() { if(authorized()) sendJSON(200,radarJSON()); }
+bool cloudPublishNow=false;
 void publishCloudSnapshot() {
-  if(!cloudConfig.enabled || otaBootPending || millis()-cloudLastQueued<cloudConfig.intervalSeconds*1000UL)return;
+  if(!cloudConfig.enabled || otaBootPending || (!cloudPublishNow && millis()-cloudLastQueued<cloudConfig.intervalSeconds*1000UL))return;
+  cloudPublishNow=false;
   cloudLastQueued=millis();
   JsonDocument d; deserializeJson(d,radarJSON());
+  d["remoteControl"]=true;
   d.remove("localIP");d.remove("apIP");d.remove("stationMAC");d.remove("hotspotMAC");d.remove("events");d.remove("targets");
   String payload;serializeJson(d,payload);queueCloudTelemetry(payload);
 }
@@ -964,6 +967,21 @@ void firmwareLoop() {
   }
   if (otaRequested) { otaRequested=false; standby=true; controlRelays(); saveLedger(); checkGithubOTA(); }
   updateButton();
+  if(cloudCommands && cloudAcks) {
+    CloudCommand command;
+    if(xQueueReceive(cloudCommands,&command,0)==pdTRUE) {
+      CloudAck ack={};ack.command=command;
+      if(int64_t(time(nullptr))*1000>command.expiresAt)strlcpy(ack.status,"expired",sizeof(ack.status));
+      else if(standby || otaBootPending || restartAt)strlcpy(ack.status,"blocked_standby",sizeof(ack.status));
+      else {
+        modes[command.channel]=command.mode;
+        logEvent(String("Online: ")+names[command.channel]+" mode -> "+(command.mode==0?"AUTO":command.mode==1?"ON":"OFF"));
+        controlRelays();cloudPublishNow=true;
+        strlcpy(ack.status,"applied",sizeof(ack.status));
+      }
+      xQueueSend(cloudAcks,&ack,0);
+    }
+  }
   readRadarData();
   if(!otaBootPending) controlRelays();
   pollMeter();

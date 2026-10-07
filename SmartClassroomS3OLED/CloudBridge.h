@@ -15,6 +15,9 @@ struct CloudConfig {
 };
 CloudConfig cloudConfig;
 QueueHandle_t cloudQueue=nullptr;
+struct CloudCommand { char id[65]; uint8_t channel,mode; int64_t expiresAt; };
+struct CloudAck { CloudCommand command; char status[32]; };
+QueueHandle_t cloudCommands=nullptr,cloudAcks=nullptr;
 portMUX_TYPE cloudLock=portMUX_INITIALIZER_UNLOCKED;
 struct CloudState { char status[96]="Disabled", uid[129]=""; uint32_t lastSuccess=0; };
 CloudState cloudState;
@@ -79,17 +82,20 @@ inline String cloudFormEscape(const String &s) {
 }
 // Network and token refresh run on their own task. Never touch OLED, relays or UARTs here.
 inline void cloudWorker(void *) {
-  String token,refresh,uid,registeredViewer;
+  String token,refresh,uid,registeredViewer,lastCommand,pendingCommand;
   uint32_t tokenAt=0;
+  CloudAck pendingAck={};bool ackPending=false;
   Preferences identity;
   if(identity.begin("classcloudid",false)) {
     if(identity.getString("key")==cloudConfig.apiKey) {refresh=identity.getString("refresh");uid=identity.getString("uid");}
+    lastCommand=identity.getString("command");
   }
   if(uid.length()) {portENTER_CRITICAL(&cloudLock);strlcpy(cloudState.uid,uid.c_str(),sizeof(cloudState.uid));portEXIT_CRITICAL(&cloudLock);}
   for(;;) {
     String *packet=nullptr;
-    if(xQueueReceive(cloudQueue,&packet,portMAX_DELAY)!=pdTRUE || !packet)continue;
-    String payload=*packet;delete packet;
+    xQueueReceive(cloudQueue,&packet,pdMS_TO_TICKS(5000));
+    String payload;bool hasPacket=packet!=nullptr;
+    if(packet) {payload=*packet;delete packet;}
     if(WiFi.status()!=WL_CONNECTED || time(nullptr)<1704067200) {cloudSetStatus("Waiting for Wi-Fi and clock");continue;}
     String response;
     if(token.isEmpty() || millis()-tokenAt>3300000UL) {
@@ -125,6 +131,34 @@ inline void cloudWorker(void *) {
     if(code==401)token="";
     if(code!=200 || deserializeJson(enrollment,response) || !enrollment.is<const char*>()) {cloudSetStatus("Pair device ID on the online dashboard");continue;}
     registeredViewer=enrollment.as<String>();
+    if(!ackPending && xQueueReceive(cloudAcks,&pendingAck,0)==pdTRUE)ackPending=true;
+    if(ackPending) {
+      // Remember processed IDs so reboot does not reapply the last manual command.
+      identity.putString("command",pendingAck.command.id);lastCommand=pendingAck.command.id;
+      JsonDocument result;result["id"]=pendingAck.command.id;result["status"]=pendingAck.status;
+      result["channel"]=pendingAck.command.channel;result["mode"]=pendingAck.command.mode;
+      result["updatedAt"][".sv"]="timestamp";String body;serializeJson(result,body);
+      int ackCode=cloudHTTP(String(cloudConfig.databaseURL)+"/acks/"+uid+".json?auth="+token,"PUT",body,response);
+      if(ackCode==200 || ackCode==204){ackPending=false;pendingCommand="";}
+      else if(ackCode==401)token="";
+    }
+    code=cloudHTTP(String(cloudConfig.databaseURL)+"/commands/"+uid+".json?auth="+token,"GET","",response);
+    JsonDocument command;
+    if(!ackPending && code==200 && !deserializeJson(command,response) && command.is<JsonObject>()) {
+      String id=command["id"] | "";
+      int ch=command["channel"] | -1,mode=command["mode"] | -1;
+      int64_t issued=command["issuedAt"] | int64_t(0),now=int64_t(time(nullptr))*1000;
+      int64_t boot=now-int64_t(millis());
+      String requester=command["requesterUid"] | "";
+      if(id.length()>0 && id.length()<=64 && id!=lastCommand && id!=pendingCommand && ch>=0 && ch<=1 && mode>=0 && mode<=2 && requester==registeredViewer) {
+        CloudCommand next={};strlcpy(next.id,id.c_str(),sizeof(next.id));next.channel=ch;next.mode=mode;next.expiresAt=issued+60000;
+        if(issued<boot || issued<now-60000 || issued>now+5000) {
+          CloudAck expired={};expired.command=next;strlcpy(expired.status,"expired",sizeof(expired.status));
+          xQueueSend(cloudAcks,&expired,0);pendingCommand=id;
+        } else if(xQueueSend(cloudCommands,&next,0)==pdTRUE)pendingCommand=id;
+      }
+    }
+    if(!hasPacket)continue;
     JsonDocument data;
     if(deserializeJson(data,payload)) {cloudSetStatus("Telemetry serialization failed");continue;}
     JsonDocument envelope;envelope["viewerUid"]=registeredViewer;envelope["updatedAt"][".sv"]="timestamp";
@@ -140,8 +174,10 @@ inline void queueCloudTelemetry(const String &json) {
   if(!cloudConfig.enabled)return;
   if(!cloudQueue) {
     cloudQueue=xQueueCreate(1,sizeof(String*));
-    if(!cloudQueue || xTaskCreate(cloudWorker,"classroom-cloud",10240,nullptr,1,nullptr)!=pdPASS) {
-      if(cloudQueue)vQueueDelete(cloudQueue);cloudQueue=nullptr;cloudSetStatus("Cloud worker could not start");return;
+    cloudCommands=xQueueCreate(1,sizeof(CloudCommand));cloudAcks=xQueueCreate(1,sizeof(CloudAck));
+    if(!cloudQueue || !cloudCommands || !cloudAcks || xTaskCreate(cloudWorker,"classroom-cloud",10240,nullptr,1,nullptr)!=pdPASS) {
+      if(cloudQueue)vQueueDelete(cloudQueue);if(cloudCommands)vQueueDelete(cloudCommands);if(cloudAcks)vQueueDelete(cloudAcks);
+      cloudQueue=nullptr;cloudCommands=nullptr;cloudAcks=nullptr;cloudSetStatus("Cloud worker could not start");return;
     }
   }
   // One pending snapshot only. Slow internet never creates an accumulating backlog.
