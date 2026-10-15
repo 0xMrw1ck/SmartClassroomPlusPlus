@@ -4,9 +4,15 @@ ESP32-S3 classroom automation with LD2450 radar, PZEM-004T v3, SSD1306 OLED, one
 ## First USB upload
 Use Arduino ESP32 core 3.3.12 and board **ESP32-S3-USB-OTG**. Select **Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)**, port COM4, and Erase All Flash **Disabled**. Keep the whole SmartClassroomS3OLED folder together. Install ArduinoJson 7.4.2, Adafruit SSD1306 2.5.17 and Adafruit GFX 1.12.6. Upload SmartClassroomS3OLED.ino once over USB to install the OTA-enabled firmware and partition table.
 
-Default pins: radar RX16/TX17, PZEM RX4/TX5, OLED SDA8/SCL9, lights relay10, fan relay11, button3 to GND. Lights vacancy:30 seconds; fan:15 seconds; button hold:5 seconds.
+Default pins: radar RX16/TX17, PZEM RX4/TX5, OLED SDA8/SCL9, lights relay18, fan relay11, button3 to GND. Lights vacancy:30 seconds; fan:15 seconds; button hold:5 seconds.
+
+Existing devices retain saved GPIO settings across firmware uploads. In the local dashboard Settings, set Lights relay GPIO to 18, Fan relay GPIO to 11, and Button GPIO to 3, then save and restart to apply this wiring.
 
 ## Web settings
+
+In Settings, **Sensor distance & load countdowns** lets users set the radar's near/far forward detection distances in metres (0 to 6 m; near must be less than far), the lights OFF countdown (default 30 seconds), and the fan OFF countdown (default 15 seconds). Countdown values are whole seconds from 1 to 86400 and apply in AUTO after the last in-zone detection; a new detection refreshes both countdowns. Left/right radar boundaries remain under Advanced settings. Distance is forward depth, not a circular radius.
+
+Press **Save settings & restart** to commit changes to nonvolatile ESP32 flash. Saves are read back before success is reported. Saved distances and countdown durations are restored after restarts and extended power-off, without a battery, internet, or a valid clock. The live countdown itself does not continue through a power outage: startup uses fresh detections with outputs initially OFF in AUTO. The existing settings format is preserved, so firmware upgrades retain prior saved values; do not erase flash/NVS. Physical power-loss verification is still required on the device.
 Connect to ESP32-LD2450 (default password ESP32Radar123), open http://192.168.4.1 and sign in (public-build defaults: admin / ChangeThisPassword). Your local USB build retains your previous login and Wi-Fi defaults through a private LocalProvisioning.h. That file must never be published.
 Settings edits are validated and saved separately from the energy ledger. Saving turns outputs OFF and restarts to apply all changes consistently. Blank password fields retain current values; the open-network checkbox explicitly clears a home Wi-Fi password. Change timers, radar bounds, clock offset, polling, OLED refresh, button hold, network/login values, GPIO assignments and OTA repository. GPIO assignments must be distinct and exclude USB/flash pins. Do not change wiring settings without matching physical wiring.
 

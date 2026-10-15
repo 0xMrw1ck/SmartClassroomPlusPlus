@@ -11,7 +11,7 @@ struct AppSettings {
   uint32_t checkpoint = 300000, buttonHold = 5000;
   int32_t xMin = -4000, xMax = 4000, yMin = 0, yMax = 6000;
   int32_t timezoneMinutes = 480;
-  int pins[9] = {16,17,4,5,8,9,10,11,3};
+  int pins[9] = {16,17,4,5,8,9,18,11,3};
   bool activeLow = true, autoUpdate = true;
   char room[49] = "Room 101";
   char ssid[33] = "", wifiPassword[65] = "";
@@ -63,6 +63,10 @@ inline bool writeSettings(const AppSettings &s) {
   Preferences store;
   if (!store.begin("classconfig",false)) return false;
   bool ok=store.putBytes("settings",&s,sizeof(s))==sizeof(s);
+  // Confirm the committed flash record before reporting a successful save.
+  AppSettings verified;
+  ok=ok && store.getBytes("settings",&verified,sizeof(verified))==sizeof(verified)
+    && memcmp(&s,&verified,sizeof(s))==0;
   store.end();
   return ok;
 }
@@ -72,12 +76,12 @@ inline void loadSettings() {
   if (!store.begin("classconfig",false)) return;
   if (store.getBytesLength("settings")==sizeof(settings)) {
     AppSettings loaded;
-    store.getBytes("settings",&loaded,sizeof(loaded));
+    size_t loadedBytes=store.getBytes("settings",&loaded,sizeof(loaded));
     // Ensure stored strings are terminated before any validation/string use.
     loaded.room[48]=0; loaded.ssid[32]=0; loaded.wifiPassword[64]=0;
     loaded.apName[32]=0; loaded.apPassword[64]=0; loaded.webUser[32]=0;
     loaded.webPassword[64]=0; loaded.repository[96]=0;
-    if (loaded.schema==1 && validateSettings(loaded).isEmpty()) {
+    if (loadedBytes==sizeof(loaded) && loaded.schema==1 && validateSettings(loaded).isEmpty()) {
       settings=loaded; settingsStorageOK=true;
     }
   } else {
