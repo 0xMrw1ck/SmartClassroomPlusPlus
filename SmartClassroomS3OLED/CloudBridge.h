@@ -23,7 +23,8 @@ struct CloudState { char status[96]="Disabled", uid[129]=""; uint32_t lastSucces
 CloudState cloudState;
 uint32_t cloudLastQueued=0;
 // 1-minute history: the main task builds one batch at a time, the worker PATCHes it.
-struct HistoryBatch { String body; uint32_t upTo=0; };
+struct HistoryBatch { String body; uint32_t upTo=0; bool reset=false; };
+volatile bool cloudResetDone=false;      // worker: online history deletion succeeded
 QueueHandle_t cloudHistoryQueue=nullptr;
 volatile uint32_t cloudHistoryAcked=0;   // last minute (UTC epoch) confirmed online
 volatile bool cloudHistoryInFlight=false;
@@ -168,7 +169,7 @@ inline void cloudWorker(void *) {
     if(cloudHistoryQueue && xQueueReceive(cloudHistoryQueue,&batch,0)==pdTRUE) {
       int historyCode=cloudHTTP(String(cloudConfig.databaseURL)+"/history/"+uid+".json?auth="+token+"&print=silent","PATCH",batch->body,response);
       // A 401 here usually means the history rules are not deployed yet: keep the token, retry in a minute.
-      if(historyCode==200 || historyCode==204)cloudHistoryAcked=batch->upTo;
+      if(historyCode==200 || historyCode==204){cloudHistoryAcked=batch->upTo;if(batch->reset)cloudResetDone=true;}
       else {cloudHistoryRetryAt=millis()+60000;Serial.printf("Cloud history upload failed (%d); retry in 60 s\n",historyCode);}
       delete batch;cloudHistoryInFlight=false;
     }

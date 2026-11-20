@@ -49,6 +49,7 @@ DayRec curDay{};
 bool hourDirty = false, dayDirty = false, energyFSOK = false;
 uint32_t lastEnergySample = 0, lastEnergyTick = 0, lastEnergyFlush = 0, lastFinalMinute = 0, savedAck = 0;
 float energyRate = 0;  // cost per kWh, 0 = not set
+bool cloudResetPending = false;  // delete online history (survives reboot until done)
 Preferences energyPrefs;
 
 // ---------- time helpers (local time = UTC + settings.timezoneMinutes) ----------
@@ -134,6 +135,7 @@ void energyLogBegin() {
   energyRate = energyPrefs.getFloat("rate", 0);
   if (!isfinite(energyRate) || energyRate < 0 || energyRate > 1000) energyRate = 0;
   cloudHistoryAcked = savedAck = energyPrefs.getUInt("ack", 0);
+  cloudResetPending = energyPrefs.getBool("cloudReset", false);
   energyFSOK = LittleFS.begin(true, "/littlefs", 4, "spiffs") &&
                ensureLogFile(MINUTE_FILE, MINUTE_SLOTS * sizeof(MinuteRec)) &&
                ensureLogFile(HOUR_FILE, HOUR_SLOTS * sizeof(HourRec)) &&
@@ -147,6 +149,8 @@ void energySample(float v, float a, float w, float hz, float pf, uint32_t meterW
   uint32_t dt = lastEnergySample ? now - lastEnergySample : 0;
   lastEnergySample = now;
   if (!minuteAcc.t || !isfinite(w)) return;
+  // Second line of defence: never let an impossible reading into the averages or energy.
+  if (v < 0 || v > 300 || a < 0 || a > 110 || w < 0 || w > 33000 || pf < 0 || pf > 1) return;
   // A long gap means the meter was offline: energy in that gap is unknown, count one interval only.
   if (dt > settings.meterPoll * 3) dt = settings.meterPoll;
   minuteAcc.v += v; minuteAcc.a += a; minuteAcc.w += w; minuteAcc.pf += pf; minuteAcc.hz += hz;
@@ -290,8 +294,52 @@ void addCloudDay(JsonDocument &doc, const DayRec &d) {
   o["peakT"] = fmtLocal(d.peakT, "%H:%M");
 }
 
+// Wipes the minute/hourly/daily logs (flash + RAM) and schedules deletion of the online history.
+// Rows recorded before the reset are never uploaded afterwards.
+bool energyLogReset() {
+  minuteAcc = MinuteAcc();
+  minuteAcc.t = clockNow() ? (uint32_t)(clockNow() / 60 * 60) : 0;
+  pendingCount = 0;
+  memset(&curHour, 0, sizeof(curHour));
+  memset(&curDay, 0, sizeof(curDay));
+  hourDirty = dayDirty = false;
+  lastEnergySample = 0;
+  bool ok = true;
+  if (energyFSOK) {
+    for (const char *f : {MINUTE_FILE, HOUR_FILE, DAY_FILE}) LittleFS.remove(f);
+    ok = ensureLogFile(MINUTE_FILE, MINUTE_SLOTS * sizeof(MinuteRec)) && ensureLogFile(HOUR_FILE, HOUR_SLOTS * sizeof(HourRec)) &&
+         ensureLogFile(DAY_FILE, DAY_SLOTS * sizeof(DayRec));
+    energyFSOK = ok;
+  }
+  cloudHistoryAcked = lastFinalMinute;
+  energyPrefs.putUInt("ack", cloudHistoryAcked);
+  savedAck = cloudHistoryAcked;
+  cloudResetPending = cloudConfig.enabled;
+  cloudResetDone = false;
+  energyPrefs.putBool("cloudReset", cloudResetPending);
+  return ok;
+}
+
 void queueHistoryBatch() {
   static uint32_t lastBuild = 0;
+  if (cloudResetDone) {  // worker confirmed the online wipe
+    cloudResetDone = false;
+    cloudResetPending = false;
+    energyPrefs.putBool("cloudReset", false);
+    logEvent("Online energy history deleted");
+  }
+  if (cloudResetPending && cloudConfig.enabled && cloudHistoryQueue && !cloudHistoryInFlight &&
+      (!cloudHistoryRetryAt || (int32_t)(millis() - cloudHistoryRetryAt) >= 0)) {
+    cloudHistoryRetryAt = 0;
+    HistoryBatch *wipe = new HistoryBatch();
+    wipe->body = "{\"minutes\":null,\"hours\":null,\"days\":null}";
+    wipe->upTo = cloudHistoryAcked;
+    wipe->reset = true;
+    cloudHistoryInFlight = true;
+    if (xQueueSend(cloudHistoryQueue, &wipe, 0) != pdTRUE) { delete wipe; cloudHistoryInFlight = false; }
+    return;
+  }
+  if (cloudResetPending) return;  // no new rows online until the old ones are gone
   if (!energyFSOK || !cloudConfig.enabled || !cloudHistoryQueue || cloudHistoryInFlight || !lastFinalMinute) return;
   if (cloudHistoryRetryAt) {  // back-off after a failed upload (cleared once passed; safe across millis() wrap)
     if ((int32_t)(millis() - cloudHistoryRetryAt) < 0) return;

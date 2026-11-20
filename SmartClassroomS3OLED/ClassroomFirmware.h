@@ -404,9 +404,23 @@ void saveLedger() {
     logEvent("ERROR: energy checkpoint failed");
   }
 }
+uint32_t lastLedgerMs = 0;
 void recordEnergy(uint32_t wh) {
   int64_t now = clockNow();
   uint32_t today = dateAt(now);
+  // Largest energy the PZEM-004T-100A can really measure in the elapsed time (~33 kW max) plus margin.
+  // A single corrupted register value must never add millions of kWh to the ledger.
+  double elapsedSec = lastLedgerMs ? (millis() - lastLedgerMs) / 1000.0
+                    : (now && ledger.previousTime && now >= ledger.previousTime) ? double(now - ledger.previousTime)
+                    : settings.checkpoint / 1000.0 + 60;
+  lastLedgerMs = millis();
+  if (ledger.baseline && wh >= ledger.previousWh && wh - ledger.previousWh > 33000.0 * elapsedSec / 3600.0 + 10) {
+    logEvent("WARNING: impossible meter jump of " + String(wh - ledger.previousWh) + " Wh ignored; new baseline");
+    ledger.previousWh = wh;
+    ledger.previousTime = now;
+    dirty = true;
+    return;
+  }
   if (!ledger.baseline) {
     ledger.baseline = true;
     ledger.previousWh = wh;
@@ -449,8 +463,23 @@ uint16_t meterReg(int n) {
 uint32_t meter32(int n) {
   return meterReg(n) | ((uint32_t)meterReg(n + 1) << 16);
 }
+bool meterResetRequested = false;
 void pollMeter() {
   uint32_t now = millis();
+  if (meterResetRequested && !meterPending) {
+    // PZEM-004T v3 "reset energy" command (0x42). Its 4-byte echo is drained before the next poll.
+    meterResetRequested = false;
+    unsigned drainBudget = 256;
+    while (meter.available() && drainBudget--) meter.read();
+    uint8_t request[4] = { METER_ADDRESS, 0x42, 0, 0 };
+    uint16_t crc = crc16(request, 2);
+    request[2] = crc & 255;
+    request[3] = crc >> 8;
+    meter.write(request, 4);
+    lastPoll = now;  // give the meter a full poll interval before the next read
+    logEvent("PZEM energy counter reset command sent");
+    return;
+  }
   if (!meterPending && (uint32_t)(now - lastPoll) >= settings.meterPoll) {
     unsigned drainBudget = 256;
     while (meter.available() && drainBudget--) meter.read();
@@ -491,12 +520,19 @@ void pollMeter() {
         logEvent("PZEM Modbus exception " + String(meterBuffer[2]));
         break;
       }
-      voltage = meterReg(0) / 10.0f;
-      current = meter32(1) / 1000.0f;
-      power = meter32(3) / 10.0f;
+      float v = meterReg(0) / 10.0f, a = meter32(1) / 1000.0f, w = meter32(3) / 10.0f;
+      float hz = meterReg(7) / 10.0f, powerFactor = meterReg(8) / 100.0f;
+      // PZEM-004T-100A limits: 80-260 V, 0-100 A, 0-26 kW, 45-65 Hz. Reject anything impossible.
+      if (v > 300 || a > 110 || w > 33000 || powerFactor > 1.0f || (v > 50 && (hz < 40 || hz > 70))) {
+        logEvent("PZEM implausible reading ignored: " + String(v, 1) + " V " + String(a, 3) + " A " + String(w, 1) + " W");
+        break;
+      }
+      voltage = v;
+      current = a;
+      power = w;
       meterWh = meter32(5);
-      frequency = meterReg(7) / 10.0f;
-      pf = meterReg(8) / 100.0f;
+      frequency = hz;
+      pf = powerFactor;
       meterSeen = true;
       lastMeterOK = now;
       recordEnergy(meterWh);
@@ -904,6 +940,27 @@ void startWebServer() {
     settimeofday(&tv, nullptr);
     logEvent("Clock set from browser");
     sendJSON(200, "{\"ok\":true}");
+  });
+  server.on("/api/energy/reset", HTTP_POST, []() {
+    if (!authorized()) return;
+    JsonDocument d;
+    String body = server.arg("plain");
+    if (body.length() > 256 || deserializeJson(d, body) || d["confirm"] != "RESET" || !d["meter"].is<bool>()) {
+      sendJSON(400, "{\"error\":\"Send {\\\"confirm\\\":\\\"RESET\\\",\\\"meter\\\":true|false}\"}");
+      return;
+    }
+    bool resetMeter = d["meter"];
+    // Legacy daily ledger: all dates, unallocated energy and the meter baseline.
+    memset(&ledger, 0, sizeof(ledger));
+    ledger.magic = LEDGER_MAGIC;
+    lastLedgerMs = 0;
+    bool ledgerOK = storageOK && prefs.putBytes("ledger", &ledger, sizeof(ledger)) == sizeof(ledger);
+    dirty = !ledgerOK;
+    bool logOK = energyLogReset();
+    if (resetMeter) meterResetRequested = true;
+    logEvent(String("Energy data reset from website") + (resetMeter ? " (PZEM counter reset requested)" : ""));
+    if (!ledgerOK || !logOK) { sendJSON(500, "{\"error\":\"Reset incomplete: flash write failed\"}"); return; }
+    sendJSON(200, String("{\"ok\":true,\"cloud\":") + (cloudResetPending ? "true" : "false") + "}");
   });
   server.on("/api/save", HTTP_POST, []() {
     if (!authorized()) return;

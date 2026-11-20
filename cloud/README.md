@@ -18,7 +18,7 @@ No payment method, custom domain, service account key, or router port forwarding
 
 ## Energy history (firmware 1.3.0)
 
-The ESP32 PATCHes one row per minute to `history/<device>/minutes/<YYYY-MM-DD>/<HHMM>`, hourly totals to `hours/<YYYY-MM-DD>/<HH>` and daily totals to `days/<YYYY-MM-DD>` (local time). The dashboard's **Energy data (CSV)** card downloads 1-minute rows for a chosen date, hourly rows for the 7 days ending on it, and all daily rows, in the same columns as the device's local CSVs. 1-minute rows older than 31 days are deleted by the device; hourly and daily totals are kept (about 1.5 MB per classroom per year in total).
+The ESP32 PATCHes one row per minute to `history/<device>/minutes/<YYYY-MM-DD>/<HHMM>`, hourly totals to `hours/<YYYY-MM-DD>/<HH>` and daily totals to `days/<YYYY-MM-DD>` (local time). The dashboard's **Energy report (Excel)** card downloads one `.xlsx` file built in the browser (`public/xlsx.js`, also embedded in the ESP32 dashboard; run `node tools/sync-xlsx.cjs` after editing it): Summary, Daily (all dates), Hourly (7 days ending on the chosen date) and Minute (the chosen date) sheets with filter arrows and filtered averages/min/max/totals. **Reset energy data** on the ESP32 deletes this history online as well. 1-minute rows older than 31 days are deleted by the device; hourly and daily totals are kept (about 1.5 MB per classroom per year in total).
 
 These paths need the updated rules: copy `database.rules.example.json` to `database.rules.json` and run `firebase deploy --only hosting,database`. Until the rules are deployed, the device logs `Cloud history upload failed (401)`, live monitoring keeps working, and rows wait on the device (up to 24 h).
 

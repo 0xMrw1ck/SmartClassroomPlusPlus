@@ -3,6 +3,7 @@ import {getAuth,GoogleAuthProvider,signInWithRedirect,getRedirectResult,onAuthSt
 import {getDatabase,ref,onValue,query,orderByChild,orderByKey,startAt,endAt,equalTo,set,get,serverTimestamp} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-database.js';
 import {readingState,number,controlState} from './state.js';
 import {minuteCsv,hourlyCsv,dailyCsv,shiftDate} from './history.js';
+import {energyWorkbook} from './xlsx.js';
 const $=id=>document.getElementById(id);
 let auth,database,unsubscribe=null,records={},selected='',serverOffset=0,currentUser=null;
 let unsubscribeAck=null,ackDevice='';
@@ -60,7 +61,7 @@ function render(){
     :Array.isArray(d.days)?[...d.days].sort((a,b)=>String(b.date).localeCompare(String(a.date))):[];
   $('history').replaceChildren();for(const day of days){const row=document.createElement('tr');for(const value of [String(day.date),number(day.kWh,3),Number.isFinite(day.peakW)?number(day.peakW,1):'—',Number.isFinite(day.cost)?number(day.cost,2):'—']){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}$('history').append(row)}$('historyEmpty').hidden=days.length>0;
   $('historyNote').textContent=detailed?'From 1-minute history uploaded by the ESP32':'Up to 31 recorded dates (device daily ledger)';
-  for(const id of ['downloadMinute','downloadHourly','downloadDaily'])$(id).disabled=!currentUser||!selected||downloadBusy;
+  $('downloadExcel').disabled=!currentUser||!selected||downloadBusy;
 }
 let historyDays={},historyDevice='',unsubscribeHistory=null,downloadBusy=false;
 function watchHistory(){
@@ -69,25 +70,26 @@ function watchHistory(){
   if(!selected||!currentUser)return;
   unsubscribeHistory=onValue(ref(database,'history/'+selected+'/days'),s=>{historyDays=s.val()||{};render()},()=>{historyDays={};render()});
 }
-function saveCsv(name,text){const url=URL.createObjectURL(new Blob([text],{type:'text/csv'})),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
-async function download(kind){
-  const device=selected,date=$('historyDate').value,room=records[device]?.telemetry?.room||'classroom';
+function saveFile(name,bytes){const url=URL.createObjectURL(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000)}
+async function downloadExcel(){
+  const device=selected,date=$('historyDate').value,room=records[device]?.telemetry?.room||'Classroom';
   if(!device||downloadBusy)return;
-  if(kind!=='daily'&&!/^\d{4}-\d{2}-\d{2}$/.test(date)){$('downloadStatus').textContent='Choose a date first.';return}
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)){$('downloadStatus').textContent='Choose a date first.';return}
   downloadBusy=true;render();$('downloadStatus').textContent='Downloading…';
   try{
-    const base='history/'+device+'/';let text,rows=0,name;
-    if(kind==='minute'){const v=(await get(ref(database,base+'minutes/'+date))).val()||{};rows=Object.keys(v).length;text=minuteCsv(date,v,room);name=`classroom-energy-1min-${date}.csv`}
-    else if(kind==='hourly'){const v=(await get(query(ref(database,base+'hours'),orderByKey(),startAt(shiftDate(date,-6)),endAt(date)))).val()||{};rows=Object.values(v).reduce((n,day)=>n+Object.keys(day||{}).length,0);text=hourlyCsv(v);name=`classroom-energy-hourly-${shiftDate(date,-6)}_to_${date}.csv`}
-    else{const v=(await get(ref(database,base+'days'))).val()||{};rows=Object.keys(v).length;text=dailyCsv(v);name='classroom-energy-daily.csv'}
-    if(!rows){$('downloadStatus').textContent='No rows uploaded for that period yet. The device needs firmware 1.3.0 and internet.';return}
-    saveCsv(name,text);$('downloadStatus').textContent=`Downloaded ${rows} row(s).`;
+    const base='history/'+device+'/',from=shiftDate(date,-6);
+    const minutes=(await get(ref(database,base+'minutes/'+date))).val()||{};
+    const hours=(await get(query(ref(database,base+'hours'),orderByKey(),startAt(from),endAt(date)))).val()||{};
+    const days=(await get(ref(database,base+'days'))).val()||{};
+    const counts=[Object.keys(minutes).length,Object.values(hours).reduce((n,d)=>n+Object.keys(d||{}).length,0),Object.keys(days).length];
+    if(!counts.some(Boolean)){$('downloadStatus').textContent='No rows uploaded yet. The device needs firmware 1.3.0 or newer and internet.';return}
+    const bytes=energyWorkbook(minuteCsv(date,minutes,room),hourlyCsv(hours),dailyCsv(days),{title:'Smart Classroom energy report — '+room,lines:[`Online dashboard download. Minute sheet: ${date}. Hourly sheet: ${from} to ${date}. Daily sheet: all uploaded dates. Device local time, 24-hour.`]});
+    saveFile(`classroom-energy-${date}.xlsx`,bytes);
+    $('downloadStatus').textContent=`Downloaded: ${counts[0]} minute, ${counts[1]} hourly and ${counts[2]} daily row(s).`;
   }catch(e){$('downloadStatus').textContent='Download failed: '+(e.code||e.message)}
   finally{downloadBusy=false;render()}
 }
-$('downloadMinute').addEventListener('click',()=>download('minute'));
-$('downloadHourly').addEventListener('click',()=>download('hourly'));
-$('downloadDaily').addEventListener('click',()=>download('daily'));
+$('downloadExcel').addEventListener('click',downloadExcel);
 $('historyDate').value=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);
 function selectDevices(){const previous=selected;$('deviceSelect').replaceChildren();for(const [uid,record] of Object.entries(records)){const option=document.createElement('option');option.value=uid;option.textContent=record.telemetry?.room||'Classroom '+uid.slice(0,6);$('deviceSelect').append(option)}selected=records[previous]?previous:Object.keys(records)[0]||'';$('deviceSelect').value=selected;watchAck();watchHistory();render()}
 $('deviceSelect').addEventListener('change',()=>{selected=$('deviceSelect').value;watchAck();watchHistory();render()});

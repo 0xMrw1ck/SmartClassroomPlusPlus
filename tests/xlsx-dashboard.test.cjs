@@ -1,0 +1,27 @@
+// The ESP32 dashboard embeds a copy of cloud/public/xlsx.js; both must stay identical and produce a valid workbook.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const root=path.join(__dirname,'..');
+const norm=s=>s.replace(/\r\n/g,'\n');
+const source=norm(fs.readFileSync(path.join(root,'SmartClassroomS3OLED/DashboardAssets.h'),'utf8'));
+const lib=norm(fs.readFileSync(path.join(root,'cloud/public/xlsx.js'),'utf8')).replace(/^export \{[^}]*\};\n?/m,'').trimEnd();
+const js=source.match(/DASHBOARD_JS\[\] PROGMEM = R"ASSET\(([\s\S]*?)\)ASSET";/)[1];
+const html=source.match(/DASHBOARD_HTML\[\] PROGMEM = R"ASSET\(([\s\S]*?)\)ASSET";/)[1];
+const embedded=js.split('// XLSX-BEGIN (generated copy of cloud/public/xlsx.js without its export line)\n')[1].split('// XLSX-END')[0].trimEnd();
+assert.equal(embedded,lib,'Run: node tools/sync-xlsx.cjs (embedded Excel builder is out of date)');
+new Function(js);
+for(const id of ['downloadExcel','excelStatus','resetEnergy','resetMeter','resetStatus','rateForm'])assert.ok(html.includes(`id="${id}"`),'missing #'+id);
+assert.ok(!/href="\/(minute|hourly|daily|energy)\.csv"/.test(html),'separate CSV download links should be gone');
+const ctx=vm.createContext({TextEncoder,Uint8Array,Uint32Array,DataView,ArrayBuffer,Date,Number,String,Math,Object,JSON});
+vm.runInContext(embedded+'\nthis.energyWorkbook=energyWorkbook;',ctx);
+const minute='timestamp,device_id,voltage_V,current_A,power_avg_W,power_peak_W,pf,frequency_Hz,energy_Wh,meter_total_Wh,lights,fan,mode,occupied,samples,meter_ok\n2026-11-20T08:02:00+08:00,"Room, 101",220.8,1.162,248.6,251.3,0.97,60.0,4.143,152417,ON,ON,AUTO,1,30,1\n2026-11-20T08:03:00+08:00,"Room, 101",,,,,,,,,ON,OFF,MANUAL,1,0,0\n';
+const bytes=ctx.energyWorkbook(minute,'hour_start,energy_kWh\n','date,energy_kWh\n',{title:'t'});
+const text=Buffer.from(bytes).toString('latin1');
+assert.equal(text.slice(0,2),'PK');
+for(const part of ['[Content_Types].xml','xl/workbook.xml','xl/styles.xml','xl/worksheets/sheet1.xml','xl/worksheets/sheet4.xml'])assert.ok(text.includes(part),'missing '+part);
+assert.ok(text.includes('SUBTOTAL(101,D8:D9)'),'minute averages must cover the data rows');
+assert.ok(text.includes('<autoFilter ref="A7:Q9"/>'),'minute sheet needs header filters over the data');
+const minuteSheet=text.split('xl/worksheets/sheet4.xml<?xml')[1].split('</worksheet>')[0];
+assert.ok(/<c r="D8" s="3"><v>220.8<\/v>/.test(minuteSheet),'voltage must be a number cell');
+assert.ok(!/<c r="D9"/.test(minuteSheet),'missing readings must stay empty cells, not zero');
+assert.ok(minuteSheet.includes('MANUAL'),'text columns are kept');
+console.log('PASS: dashboard Excel builder matches cloud copy, page has Excel + reset controls, workbook has filters and SUBTOTAL averages');
