@@ -157,6 +157,10 @@ The initial sketch decoded bit 15 as negative. Hi-Link's LD2450 protocol uses bi
 - Bad-reading guards (1.3.1): PZEM frames outside 0–300 V, 0–110 A, 0–33 kW, PF 0–1 or 40–70 Hz are ignored, and a lifetime-counter jump larger than 33 kW could produce in the elapsed time is logged and re-baselined instead of being added to the daily totals.
 - With online monitoring enabled, every minute row plus the hourly/daily totals are uploaded to Firebase under `history/<device>/`. Rows recorded while offline are uploaded when the connection returns (up to the 24 h the device keeps). 1-minute rows older than 31 days are removed online; hourly/daily totals stay.
 
+### Firmware size and OTA (1.3.2)
+
+Devices flashed with the Arduino IDE default "Default 4MB with spiffs" scheme have a 1,310,720-byte OTA slot; "Minimal SPIFFS" has 1,966,080 bytes. OTA cannot change the partition table, so releases are kept under 1,310,720 bytes (the release workflow fails otherwise). The dashboard HTML/CSS/JS is served from gzip copies in `DashboardAssetsGz.h`: after editing `DashboardAssets.h`, run `node tools/sync-xlsx.cjs` (if `cloud/public/xlsx.js` changed) and then `node tools/build-assets.cjs`. If an update is refused, the Firmware updates line now states the exact reason, including the size and slot size.
+
 ### Clock
 
 With internet, the clock syncs automatically from `ph.pool.ntp.org` / `time.google.com` as soon as Wi-Fi connects and then hourly. All dates and times use the Timezone setting (default 480 minutes = Philippines UTC+8) in 24-hour format. **Set ESP32 time from this device** is only needed without internet.

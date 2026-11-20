@@ -15,7 +15,8 @@
 #include "AppSettings.h"
 #include "GithubOTA.h"
 #include "CloudBridge.h"
-#include "DashboardAssets.h"
+#include "DashboardAssets.h"    // editable source (icons and manifest are served from here)
+#include "DashboardAssetsGz.h"  // generated gzip copies of the HTML/CSS/JS actually served
 #include "ButtonInput.h"
 #include "ButtonInputChecks.h"
 
@@ -770,6 +771,12 @@ bool authorized() {
   server.requestAuthentication();
   return false;
 }
+// Dashboard pages are stored gzip-compressed (DashboardAssetsGz.h); every current browser decodes them.
+void sendGzip(const char *type, const uint8_t *data, size_t length, const char *cache) {
+  server.sendHeader("Cache-Control", cache);
+  server.sendHeader("Content-Encoding", "gzip");
+  server.send_P(200, type, reinterpret_cast<const char *>(data), length);
+}
 void sendJSON(int code, const String &s) {
   server.sendHeader("Cache-Control", "no-store");
   server.send(code, "application/json", s);
@@ -870,21 +877,18 @@ void startWebServer() {
     sendJSON(200,"{\"ok\":true,\"restartRequired\":true}"); restartAt=millis()+1000;
   });
   server.on("/app.css", HTTP_GET, []() {
-    server.sendHeader("Cache-Control", "no-cache");
-    server.send_P(200, "text/css", DASHBOARD_CSS);
+    sendGzip("text/css", DASHBOARD_CSS_GZ, sizeof(DASHBOARD_CSS_GZ), "no-cache");
   });
   server.on("/app.js", HTTP_GET, []() {
-    server.sendHeader("Cache-Control", "no-cache");
-    server.send_P(200, "application/javascript", DASHBOARD_JS);
+    sendGzip("application/javascript", DASHBOARD_JS_GZ, sizeof(DASHBOARD_JS_GZ), "no-cache");
   });
   server.on("/manifest.webmanifest", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-cache");
     server.send_P(200, "application/manifest+json", DASHBOARD_MANIFEST);
   });
   server.on("/sw.js", HTTP_GET, []() {
-    server.sendHeader("Cache-Control", "no-cache");
     server.sendHeader("Service-Worker-Allowed", "/");
-    server.send_P(200, "application/javascript", DASHBOARD_SW);
+    sendGzip("application/javascript", DASHBOARD_SW_GZ, sizeof(DASHBOARD_SW_GZ), "no-cache");
   });
   server.on("/icon-192.png", HTTP_GET, []() {
     server.send_P(200, "image/png", reinterpret_cast<const char *>(DASHBOARD_ICON_192), sizeof(DASHBOARD_ICON_192));
@@ -894,8 +898,7 @@ void startWebServer() {
   });
   server.on("/", HTTP_GET, []() {
     if (!authorized()) return;
-    server.sendHeader("Cache-Control", "no-store");
-    server.send_P(200, "text/html; charset=utf-8", DASHBOARD_HTML);
+    sendGzip("text/html; charset=utf-8", DASHBOARD_HTML_GZ, sizeof(DASHBOARD_HTML_GZ), "no-store");
   });
   server.on("/api/data", HTTP_GET, handleRadarApi);
   server.on("/api/resume", HTTP_POST, []() {

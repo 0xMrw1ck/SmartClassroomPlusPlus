@@ -4,7 +4,7 @@
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include "OtaTrust.h"
-#define FIRMWARE_VERSION "1.3.1"
+#define FIRMWARE_VERSION "1.3.2"
 #define FIRMWARE_BOARD "esp32s3usbotg-4mb"
 String otaStatus="Waiting for startup check";
 bool otaRequested=false, otaBootPending=true;
@@ -38,7 +38,13 @@ inline void checkGithubOTA() {
   size_t size=d["size"]|0;
   bool hashOK=hash.length()==64;
   for (char ch:hash) if (!isxdigit(static_cast<unsigned char>(ch))) hashOK=false;
-  if (board!=FIRMWARE_BOARD || !url.startsWith(base+"download/") || !url.endsWith("/firmware.bin") || !hashOK || !slot || !size || size>slot->size) { otaStatus="Rejected incompatible release"; return; }
+  // GitHub owner/repo names are case-insensitive; compare the URL prefix the same way.
+  String lowerURL=url, lowerBase=base; lowerURL.toLowerCase(); lowerBase.toLowerCase();
+  if (board!=FIRMWARE_BOARD) { otaStatus="Rejected "+version+": built for board "+board; return; }
+  if (!lowerURL.startsWith(lowerBase+"download/") || !url.endsWith("/firmware.bin")) { otaStatus="Rejected "+version+": unexpected download URL"; return; }
+  if (!hashOK || !size) { otaStatus="Rejected "+version+": invalid manifest checksum or size"; return; }
+  if (!slot) { otaStatus="Rejected "+version+": no OTA partition on this device"; return; }
+  if (size>slot->size) { otaStatus="Rejected "+version+": "+String(size)+" bytes > "+String(slot->size)+"-byte update slot. Flash once by USB with Partition Scheme \"Minimal SPIFFS\"."; return; }
   configureOTAHTTP(h);
   if (!h.begin(client,url) || h.GET()!=200 || h.getSize()!=static_cast<int>(size)) { otaStatus="Firmware download failed"; h.end(); return; }
   if (!Update.begin(size) || !Update.setSHA256(hash.c_str())) { Update.abort(); otaStatus="Update initialization failed"; h.end(); return; }

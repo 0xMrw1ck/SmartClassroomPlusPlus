@@ -19,6 +19,7 @@ jobs:
           node tests/settings-dashboard.test.cjs
           node tests/cloud-dashboard.test.cjs
           node tests/xlsx-dashboard.test.cjs
+          node tests/assets-gz.test.cjs
           node --test cloud/tests/state.test.js cloud/tests/history.test.js cloud/tests/xlsx.test.js
       - uses: arduino/setup-arduino-cli@v2
       - name: Install toolchain
@@ -37,7 +38,8 @@ jobs:
           python3 - <<'PY'
           import os,json,hashlib,pathlib
           b=pathlib.Path('firmware.bin').read_bytes()
-          assert len(b)<=1966080
+          # Devices flashed with the Arduino "Default 4MB" partition scheme have a 1,310,720-byte OTA slot.
+          assert len(b)<=1310720, f'firmware {len(b)} bytes exceeds the 1310720-byte default OTA slot'
           data={'version':os.environ['VERSION'],'board':'esp32s3usbotg-4mb','size':len(b),'sha256':hashlib.sha256(b).hexdigest(),'url':f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['GITHUB_REF_NAME']}/firmware.bin"}
           pathlib.Path('manifest.json').write_text(json.dumps(data))
           PY
