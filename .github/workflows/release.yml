@@ -17,6 +17,8 @@ jobs:
         run: |
           node tests/button-dashboard.test.cjs
           node tests/settings-dashboard.test.cjs
+          node tests/cloud-dashboard.test.cjs
+          node --test cloud/tests/state.test.js cloud/tests/history.test.js
       - uses: arduino/setup-arduino-cli@v2
       - name: Install toolchain
         run: |

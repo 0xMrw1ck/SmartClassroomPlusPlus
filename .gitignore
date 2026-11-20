@@ -5,3 +5,12 @@
 *.map
 *.png
 .build/
+
+cloud/database.rules.json
+cloud/firebase-debug.log
+cloud/.firebase/
+cloud/owner-config.json
+cloud/firebase-cli-consent.png
+cloud/dashboard-preview.png
+cloud/firebase-database-created.png
+cloud/public/config.json

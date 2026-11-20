@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
+#include <esp_sntp.h>
 #include <math.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -354,6 +355,23 @@ void readRadarData() {
     }
   }
 }
+#include "EnergyLog.h"
+// Internet time: epoch stays UTC; every display/date adds settings.timezoneMinutes
+// (default 480 = Philippines UTC+8) and uses 24-hour format.
+volatile bool clockSyncedFlag = false;
+bool clockFromInternet = false;
+void onClockSynced(struct timeval *) { clockSyncedFlag = true; }
+void startInternetClock() {
+  sntp_set_time_sync_notification_cb(onClockSynced);
+  configTime(0, 0, "ph.pool.ntp.org", "time.google.com", "pool.ntp.org");
+}
+void reportClockSync() {
+  if (!clockSyncedFlag) return;
+  clockSyncedFlag = false;
+  bool first = !clockFromInternet;
+  clockFromInternet = true;
+  if (first) logEvent("Clock set from internet (" + tzSuffix() + ", 24-hour)");
+}
 void addDay(uint32_t date, uint32_t wh) {
   int slot = -1;
   uint32_t oldest = 0xFFFFFFFF;
@@ -375,6 +393,7 @@ uint64_t dayWh(uint32_t date) {
   return 0;
 }
 void saveLedger() {
+  flushEnergyLog();  // standby, settings save, OTA and manual save all checkpoint the minute log too
   if (!storageOK || !dirty) return;
   if (prefs.putBytes("ledger", &ledger, sizeof(ledger)) == sizeof(ledger)) {
     dirty = false;
@@ -481,6 +500,7 @@ void pollMeter() {
       meterSeen = true;
       lastMeterOK = now;
       recordEnergy(meterWh);
+      energySample(voltage, current, power, frequency, pf, meterWh);
     }
   }
   if (meterPending && (uint32_t)(now - requestAt) > 500) {
@@ -722,6 +742,7 @@ String radarJSON() {
   int64_t epoch = clockNow();
   uint32_t today = dateAt(epoch);
   String s = "{\"time\":" + quote(timestamp()) + ",\"timeValid\":" + (epoch ? "true" : "false");
+  s += ",\"clockSource\":" + quote(!epoch ? "none" : clockFromInternet ? "internet" : "manual") + ",\"timezone\":" + quote("UTC" + tzSuffix());
   s += ",\"standby\":" + String(standby ? "true" : "false") + ",\"deviceStatus\":" + quote(standby ? "STANDBY" : "RUNNING");
   s += ",\"buttonCountdown\":" + String(buttonStandbySeconds()) + ",\"buttonPin\":" + String(BUTTON_PIN) + ",\"oledView\":" + String(oledView);
   s += ",\"buttonDown\":" + String(digitalRead(BUTTON_PIN) == LOW ? "true" : "false");
@@ -898,6 +919,7 @@ void startWebServer() {
     server.sendHeader("Content-Disposition", "attachment; filename=classroom-energy.csv");
     server.send(200, "text/csv", csv);
   });
+  registerEnergyRoutes();
   server.on("/events.txt", HTTP_GET, []() {
     if (!authorized()) return;
     String s;
@@ -946,13 +968,14 @@ void firmwareSetup() {
   }
   logEvent("Boot: outputs OFF; both channels AUTO; serial 115200 baud");
   if (!storageOK) logEvent("ERROR: persistent energy storage unavailable");
+  energyLogBegin();
   WiFi.mode(WIFI_AP_STA);
   WiFi.setAutoReconnect(true);
   startAccessPoint();
   Serial.println("Home Wi-Fi MAC (router allowlist): " + WiFi.macAddress());
   Serial.println("Hotspot MAC: " + WiFi.softAPmacAddress());
   connectToHomeWiFi();
-  configTime(0, 0, "pool.ntp.org", "time.google.com");  // Epoch stays UTC; display/date code adds UTC+8.
+  startInternetClock();
   startWebServer();
   logEvent("Web server ready; AUTO holds outputs if radar unavailable");
   initializeOLED();
@@ -985,6 +1008,7 @@ void firmwareLoop() {
   readRadarData();
   if(!otaBootPending) controlRelays();
   pollMeter();
+  energyLogLoop();
   updateOLED();
   server.handleClient();
   publishCloudSnapshot();
@@ -992,7 +1016,9 @@ void firmwareLoop() {
   if (connected != wifiWasConnected) {
     wifiWasConnected = connected;
     logEvent(connected ? "Wi-Fi connected: http://" + WiFi.localIP().toString() : "Wi-Fi disconnected; hotspot still available");
+    if (connected) startInternetClock();  // sync immediately on every (re)connect, then hourly
   }
+  reportClockSync();
   if (!connected && (uint32_t)(millis() - lastReconnect) >= 30000) {
     lastReconnect = millis();
     WiFi.reconnect();

@@ -1,0 +1,21 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const source=fs.readFileSync(require('node:path').join(__dirname,'../SmartClassroomS3OLED/DashboardAssets.h'),'utf8');
+const js=source.match(/DASHBOARD_JS\[\] PROGMEM = R"ASSET\(([\s\S]*?)\)ASSET";/)[1];
+const nodes=new Map(),config={enabled:true,apiKey:'public-api-key',databaseURL:'https://example.firebaseio.com',intervalSeconds:30,status:'Waiting for approval',deviceUid:'device123',lastSuccessAgeSec:null};
+let posted,error=false;
+const context=vm.createContext({document:{getElementById(id){if(!nodes.has(id))nodes.set(id,{value:'',addEventListener(type,fn){this.handler=fn}});return nodes.get(id)}},fetchTimed:async(url,options)=>{assert.equal(url,'/api/cloud');if(options?.method){posted=JSON.parse(options.body);return {ok:!error,json:async()=>error?{error:'Cannot save cloud configuration'}:{ok:true}}}return {ok:true,json:async()=>config}}});
+vm.runInContext("const $=id=>document.getElementById(id);let cloudLoaded=false;",context);
+vm.runInContext(js.split('\n').find(l=>l.startsWith('async function loadCloud(')),context);
+vm.runInContext(js.split('\n').find(l=>l.startsWith("$('cloudForm').addEventListener")),context);
+(async()=>{
+ await vm.runInContext('loadCloud()',context);
+ assert.equal(nodes.get('cloudUid').textContent,'device123');assert.equal(nodes.get('cloudEnabled').checked,true);
+ nodes.get('cloudInterval').value='45';nodes.get('cloudKey').value=' public-api-key ';nodes.get('cloudURL').value=' https://example.firebaseio.com/ ';
+ config.status='Publishing live data';config.lastSuccessAgeSec=2;
+ await vm.runInContext('loadCloud()',context);
+ assert.equal(nodes.get('cloudInterval').value,'45','Polling must preserve unsaved edits');assert.match(nodes.get('cloudStatus').textContent,/2s ago/);
+ await nodes.get('cloudForm').handler({preventDefault(){}});
+ assert.deepEqual(posted,{enabled:true,apiKey:'public-api-key',databaseURL:'https://example.firebaseio.com',intervalSeconds:45});assert.match(nodes.get('cloudStatus').textContent,/Saved/);
+ error=true;await nodes.get('cloudForm').handler({preventDefault(){}});assert.equal(nodes.get('cloudStatus').textContent,'Cannot save cloud configuration');
+ console.log('PASS: cloud settings retain edits during polling, submit typed values and surface save failures');
+})().catch(e=>{console.error(e);process.exitCode=1});

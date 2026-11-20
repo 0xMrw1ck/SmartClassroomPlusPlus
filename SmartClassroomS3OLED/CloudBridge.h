@@ -22,6 +22,12 @@ portMUX_TYPE cloudLock=portMUX_INITIALIZER_UNLOCKED;
 struct CloudState { char status[96]="Disabled", uid[129]=""; uint32_t lastSuccess=0; };
 CloudState cloudState;
 uint32_t cloudLastQueued=0;
+// 1-minute history: the main task builds one batch at a time, the worker PATCHes it.
+struct HistoryBatch { String body; uint32_t upTo=0; };
+QueueHandle_t cloudHistoryQueue=nullptr;
+volatile uint32_t cloudHistoryAcked=0;   // last minute (UTC epoch) confirmed online
+volatile bool cloudHistoryInFlight=false;
+volatile uint32_t cloudHistoryRetryAt=0;
 
 inline bool validCloudURL(const String &url) {
   if (!url.startsWith("https://") || url.length()>192) return false;
@@ -158,6 +164,14 @@ inline void cloudWorker(void *) {
         } else if(xQueueSend(cloudCommands,&next,0)==pdTRUE)pendingCommand=id;
       }
     }
+    HistoryBatch *batch=nullptr;
+    if(cloudHistoryQueue && xQueueReceive(cloudHistoryQueue,&batch,0)==pdTRUE) {
+      int historyCode=cloudHTTP(String(cloudConfig.databaseURL)+"/history/"+uid+".json?auth="+token+"&print=silent","PATCH",batch->body,response);
+      // A 401 here usually means the history rules are not deployed yet: keep the token, retry in a minute.
+      if(historyCode==200 || historyCode==204)cloudHistoryAcked=batch->upTo;
+      else {cloudHistoryRetryAt=millis()+60000;Serial.printf("Cloud history upload failed (%d); retry in 60 s\n",historyCode);}
+      delete batch;cloudHistoryInFlight=false;
+    }
     if(!hasPacket)continue;
     JsonDocument data;
     if(deserializeJson(data,payload)) {cloudSetStatus("Telemetry serialization failed");continue;}
@@ -175,9 +189,10 @@ inline void queueCloudTelemetry(const String &json) {
   if(!cloudQueue) {
     cloudQueue=xQueueCreate(1,sizeof(String*));
     cloudCommands=xQueueCreate(1,sizeof(CloudCommand));cloudAcks=xQueueCreate(1,sizeof(CloudAck));
-    if(!cloudQueue || !cloudCommands || !cloudAcks || xTaskCreate(cloudWorker,"classroom-cloud",10240,nullptr,1,nullptr)!=pdPASS) {
-      if(cloudQueue)vQueueDelete(cloudQueue);if(cloudCommands)vQueueDelete(cloudCommands);if(cloudAcks)vQueueDelete(cloudAcks);
-      cloudQueue=nullptr;cloudCommands=nullptr;cloudAcks=nullptr;cloudSetStatus("Cloud worker could not start");return;
+    cloudHistoryQueue=xQueueCreate(1,sizeof(HistoryBatch*));
+    if(!cloudQueue || !cloudCommands || !cloudAcks || !cloudHistoryQueue || xTaskCreate(cloudWorker,"classroom-cloud",10240,nullptr,1,nullptr)!=pdPASS) {
+      if(cloudQueue)vQueueDelete(cloudQueue);if(cloudCommands)vQueueDelete(cloudCommands);if(cloudAcks)vQueueDelete(cloudAcks);if(cloudHistoryQueue)vQueueDelete(cloudHistoryQueue);
+      cloudQueue=nullptr;cloudCommands=nullptr;cloudAcks=nullptr;cloudHistoryQueue=nullptr;cloudSetStatus("Cloud worker could not start");return;
     }
   }
   // One pending snapshot only. Slow internet never creates an accumulating backlog.

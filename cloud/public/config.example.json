@@ -1,0 +1,7 @@
+{
+  "apiKey": "YOUR_FIREBASE_WEB_API_KEY",
+  "authDomain": "YOUR_SITE.web.app",
+  "projectId": "YOUR_FIREBASE_PROJECT_ID",
+  "appId": "YOUR_FIREBASE_WEB_APP_ID",
+  "databaseURL": "https://YOUR_PROJECT-default-rtdb.REGION.firebasedatabase.app"
+}
