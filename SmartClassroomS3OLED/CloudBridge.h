@@ -191,7 +191,7 @@ inline void queueCloudTelemetry(const String &json) {
     cloudQueue=xQueueCreate(1,sizeof(String*));
     cloudCommands=xQueueCreate(1,sizeof(CloudCommand));cloudAcks=xQueueCreate(1,sizeof(CloudAck));
     cloudHistoryQueue=xQueueCreate(1,sizeof(HistoryBatch*));
-    if(!cloudQueue || !cloudCommands || !cloudAcks || !cloudHistoryQueue || xTaskCreate(cloudWorker,"classroom-cloud",10240,nullptr,1,nullptr)!=pdPASS) {
+    if(!cloudQueue || !cloudCommands || !cloudAcks || !cloudHistoryQueue || xTaskCreatePinnedToCore(cloudWorker,"classroom-cloud",10240,nullptr,1,nullptr,1)!=pdPASS) {
       if(cloudQueue)vQueueDelete(cloudQueue);if(cloudCommands)vQueueDelete(cloudCommands);if(cloudAcks)vQueueDelete(cloudAcks);if(cloudHistoryQueue)vQueueDelete(cloudHistoryQueue);
       cloudQueue=nullptr;cloudCommands=nullptr;cloudAcks=nullptr;cloudHistoryQueue=nullptr;cloudSetStatus("Cloud worker could not start");return;
     }

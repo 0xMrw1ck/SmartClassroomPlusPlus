@@ -156,10 +156,15 @@ int targetCount() {
     if (t.inZone) n++;
   return n;
 }
+uint32_t lastRelayOnAt = 0;
 void setRelay(int ch, bool on, const char *reason) {
+  // Stagger switch-ON of the two channels by 250 ms so both relay coils and load inrush
+  // never hit the 5 V supply at the same instant (a common cause of brownout resets/Wi-Fi drops).
+  if (on && !relays[ch] && lastRelayOnAt && (uint32_t)(millis() - lastRelayOnAt) < 250) return;
   // Reassert the commanded GPIO even when the cached state already matches.
   digitalWrite(RELAY_PINS[ch], RELAY_ACTIVE_LOW ? !on : on);
   if (relays[ch] == on) return;
+  if (on) lastRelayOnAt = millis() | 1;
   relays[ch] = on;
   Serial.printf("Relay %s GPIO%d -> %s (active-%s)\n", names[ch], RELAY_PINS[ch],
     digitalRead(RELAY_PINS[ch]) == HIGH ? "HIGH" : "LOW", RELAY_ACTIVE_LOW ? "low" : "high");
@@ -991,13 +996,71 @@ void startWebServer() {
   });
   server.begin();
 }
+// ---- Wi-Fi stability ----
+// The hotspot and the home-Wi-Fi link share one radio and one channel. Every home-Wi-Fi
+// reconnect scan or channel change disconnects phones on the hotspot, so reconnects back off
+// and are paused while someone uses the hotspot, and the hotspot starts on the router's last channel.
+volatile uint8_t wifiDropReason = 0;
+uint32_t reconnectDelayMs = 30000;
+bool homeWiFiConfigured() { return HOME_WIFI_SSID[0] != 0; }
+String resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power on";
+    case ESP_RST_SW: return "restart by firmware (settings/update)";
+    case ESP_RST_PANIC: return "software crash";
+    case ESP_RST_INT_WDT: case ESP_RST_TASK_WDT: case ESP_RST_WDT: return "watchdog (software stalled)";
+    case ESP_RST_BROWNOUT: return "BROWNOUT - 5 V supply dipped (check power supply / relay wiring)";
+    case ESP_RST_EXT: return "reset button";
+    case ESP_RST_USB: return "USB reset";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    default: return "unknown (" + String((int)esp_reset_reason()) + ")";
+  }
+}
 void connectToHomeWiFi() {
+  if (!homeWiFiConfigured()) { Serial.println("No home Wi-Fi configured; hotspot only"); return; }
   Serial.println("Connecting to home Wi-Fi (nonblocking)...");
   WiFi.begin(HOME_WIFI_SSID, HOME_WIFI_PASSWORD);
 }
 void startAccessPoint() {
-  if (WiFi.softAP(AP_WIFI_SSID, AP_WIFI_PASSWORD)) logEvent("Hotspot: " + String(AP_WIFI_SSID) + " http://" + WiFi.softAPIP().toString());
+  uint8_t ch = storageOK ? prefs.getUChar("apChannel", 1) : 1;
+  if (ch < 1 || ch > 13) ch = 1;
+  if (WiFi.softAP(AP_WIFI_SSID, AP_WIFI_PASSWORD, ch)) logEvent("Hotspot: " + String(AP_WIFI_SSID) + " http://" + WiFi.softAPIP().toString() + " channel " + String(ch));
   else logEvent("ERROR: hotspot failed");
+}
+void rememberRouterChannel() {
+  uint8_t ch = WiFi.channel();
+  if (storageOK && ch >= 1 && ch <= 13 && prefs.getUChar("apChannel", 1) != ch) prefs.putUChar("apChannel", ch);
+}
+void maintainWiFi() {
+  bool connected = WiFi.status() == WL_CONNECTED;
+  static uint8_t lastLoggedReason = 0; static uint32_t lastDropLog = 0;
+  uint8_t r = wifiDropReason;
+  if (r) {
+    wifiDropReason = 0;
+    // Same reason again within 10 minutes = still retrying; do not flood the activity log.
+    if (r == lastLoggedReason && (uint32_t)(millis() - lastDropLog) < 600000) r = 0;
+    else { lastLoggedReason = r; lastDropLog = millis(); }
+  }
+  if (r) {
+    const char *why = r == 15 || r == 204 || r == 202 ? "wrong password" : r == 201 ? "network not found" : r == 200 || r == 8 ? "signal lost" : r == 2 || r == 4 ? "router timeout" : "router dropped link";
+    logEvent("Home Wi-Fi lost: " + String(why) + " (code " + String(r) + ")");
+  }
+  if (connected != wifiWasConnected) {
+    wifiWasConnected = connected;
+    logEvent(connected ? "Wi-Fi connected: http://" + WiFi.localIP().toString() + " RSSI " + String(WiFi.RSSI()) + " dBm" : "Wi-Fi disconnected; hotspot still available");
+    if (connected) { startInternetClock(); rememberRouterChannel(); reconnectDelayMs = 30000; }
+    lastReconnect = millis();
+  }
+  if (connected || !homeWiFiConfigured()) return;
+  // Phones on the hotspot: let the driver stop scanning and retry only every 5 minutes.
+  bool hotspotInUse = WiFi.softAPgetStationNum() > 0;
+  WiFi.setAutoReconnect(!hotspotInUse);
+  uint32_t wait = hotspotInUse ? 300000 : reconnectDelayMs;
+  if ((uint32_t)(millis() - lastReconnect) >= wait) {
+    lastReconnect = millis();
+    WiFi.reconnect();
+    if (!hotspotInUse) reconnectDelayMs = min<uint32_t>(reconnectDelayMs * 2, 300000);
+  }
 }
 
 void firmwareSetup() {
@@ -1027,9 +1090,14 @@ void firmwareSetup() {
     ledger.magic = LEDGER_MAGIC;
   }
   logEvent("Boot: outputs OFF; both channels AUTO; serial 115200 baud");
+  logEvent("Last restart cause: " + resetReasonText());
   if (!storageOK) logEvent("ERROR: persistent energy storage unavailable");
   energyLogBegin();
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.persistent(false);
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) { wifiDropReason = info.wifi_sta_disconnected.reason; },
+               ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.mode(homeWiFiConfigured() ? WIFI_AP_STA : WIFI_AP);
+  WiFi.setSleep(false);  // modem power-save causes dropped/slow connections on both networks
   WiFi.setAutoReconnect(true);
   startAccessPoint();
   Serial.println("Home Wi-Fi MAC (router allowlist): " + WiFi.macAddress());
@@ -1072,17 +1140,8 @@ void firmwareLoop() {
   updateOLED();
   server.handleClient();
   publishCloudSnapshot();
-  bool connected = WiFi.status() == WL_CONNECTED;
-  if (connected != wifiWasConnected) {
-    wifiWasConnected = connected;
-    logEvent(connected ? "Wi-Fi connected: http://" + WiFi.localIP().toString() : "Wi-Fi disconnected; hotspot still available");
-    if (connected) startInternetClock();  // sync immediately on every (re)connect, then hourly
-  }
+  maintainWiFi();  // logs drops with reason, syncs clock on reconnect, backs off retries
   reportClockSync();
-  if (!connected && (uint32_t)(millis() - lastReconnect) >= 30000) {
-    lastReconnect = millis();
-    WiFi.reconnect();
-  }
   if ((uint32_t)(millis() - lastSummary) >= 5000) {
     lastSummary = millis();
     Serial.printf("Button GPIO%d=%s debounced=%s device=%s view=%u\n", BUTTON_PIN,
